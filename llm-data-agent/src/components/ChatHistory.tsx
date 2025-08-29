@@ -13,14 +13,33 @@ const ChatHistory: React.FC<ChatHistoryProps> = ({ messages }) => {
         {messages.map((msg, index) => (
           <div key={index} className={`message ${msg.role}`}>
             <strong>{msg.role === 'user' ? 'You' : 'Assistant'}:</strong>
-            {msg.image ? (
+            {msg.content && <p>{msg.content}</p>}
+            {msg.image && (
               <div>
                 <p>{msg.content}</p>
                 <img src={msg.image} alt="Generated Plot" />
                 <a href={msg.image} download="generated_plot.png">💾 Download Plot</a>
               </div>
-            ) : (
-              <p>{msg.content}</p>
+            )}
+            {msg.table && (
+              <table className="chat-table">
+                <thead>
+                  <tr>
+                    {msg.table.columns.map((col) => (
+                      <th key={col}>{col}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {msg.table.rows.map((row: any[], rowIndex: number) => (
+                    <tr key={rowIndex}>
+                      {row.map((cell, cellIndex) => (
+                        <td key={cellIndex}>{cell}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
           </div>
         ))}

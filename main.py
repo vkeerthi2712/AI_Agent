@@ -19,6 +19,9 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import seaborn as sns
 from functools import lru_cache
+import umap
+from sklearn.metrics import roc_curve, auc
+from sklearn.decomposition import PCA
 
 # ---------------------------
 # Load API Key
@@ -63,6 +66,9 @@ class ChartType(str, Enum):
     smooth_curve = "smooth_curve"
     logistic_regression = "logistic_regression"
     kaplan_meier = "kaplan_meier"
+    umap = "umap"
+    roc = "roc"
+    pca = "pca"
 
 class OutputFormat(str, Enum):
     png = "png"
@@ -108,9 +114,12 @@ def normalize_column(col: Optional[str], df_columns: tuple) -> Optional[str]:
             return c
     return None
 
-def pick_default_numeric(df: pd.DataFrame, n=1):
-    """Select default numeric columns."""
+def pick_default_numeric(df: pd.DataFrame, n=1, exclude=None):
+    """Select default numeric columns, excluding specified columns if provided."""
     nums = df.select_dtypes(include=[np.number]).columns.tolist()
+    if exclude is not None:
+        exclude = [col.strip().lower() for col in (exclude if isinstance(exclude, list) else [exclude])]
+        nums = [col for col in nums if col not in exclude]
     return nums[:n] if len(nums) >= n else []
 
 # ---------------------------
@@ -120,10 +129,10 @@ def llm_router(instruction: str, df: pd.DataFrame) -> Dict[str, Any]:
     system_prompt = (
         "You are an expert assistant that converts plotting instructions into a JSON object containing a ChartSpec and executable Python code for rendering the chart. "
         "Return ONLY valid JSON with two fields: 'spec' (matching the ChartSpec model) and 'code' (a string of Python code to render the chart). "
-        "Supported chart types: [line, bar, scatter, hist, box, violin, swarm, pie, heatmap, volcano, tga, dtg, cluster_heatmap, exp_curve, log_curve, smooth_curve, logistic_regression, kaplan_meier]. "
+        "Supported chart types: [line, bar, scatter, hist, box, violin, swarm, pie, heatmap, volcano, tga, dtg, cluster_heatmap, exp_curve, log_curve, smooth_curve, logistic_regression, kaplan_meier, umap, roc, pca]. "
         "Only use column names that exist in the dataset: " + ", ".join(df.columns.astype(str)) + ". "
         "The code must: "
-        "- NOT include any import statements (use pre-provided modules: plt, sns, np, pd, re, curve_fit, UnivariateSpline, gradient, HTTPException). "
+        "- NOT include any import statements (use pre-provided modules: plt, sns, np, pd, re, curve_fit, UnivariateSpline, gradient, HTTPException, umap, roc_curve, auc, PCA). "
         "- Normalize df columns to lowercase stripped using: df.columns = [c.strip().lower() for c in df.columns]. "
         "- Use normalize_column and pick_default_numeric helpers if needed. "
         "- Handle fallback defaults for x, y, etc., using pick_default_numeric. "
@@ -134,9 +143,12 @@ def llm_router(instruction: str, df: pd.DataFrame) -> Dict[str, Any]:
         "- For cluster_heatmap, use sns.clustermap, set row_cluster=True, col_cluster=True, and save the figure correctly. "
         "- For logistic_regression, ensure y values are cast to np.float64 for curve fitting and use np.min and np.max for range calculations. "
         "- For smooth_curve, sort x and y by x to ensure x is strictly increasing, remove duplicates, and use UnivariateSpline with a reasonable smoothing factor (e.g., s=len(unique_x)/2). "
-        "- Raise HTTPException for errors (e.g., missing columns, invalid data, or insufficient unique x values for smooth_curve). "
-        "Example output for smooth_curve: {\"spec\": {\"chart_type\": \"smooth_curve\", \"x\": \"signal\", \"y\": \"score\", \"group\": null, \"bins\": null, \"title\": \"Smooth Curve: Score vs Signal\", \"x_label\": \"Signal\", \"y_label\": \"Score\", \"color\": null, \"size\": null, \"fdr_col\": null}, "
-        "\"code\": \"df.columns = [c.strip().lower() for c in df.columns]\\nif 'signal' not in df.columns or 'score' not in df.columns:\\n    raise HTTPException(400, detail='Missing required columns: signal or score')\\nxy = pd.DataFrame({'x': df['signal'], 'y': df['score']}).dropna().sort_values('x').drop_duplicates('x')\\nx = xy['x'].values\\ny = xy['y'].values\\nif len(x) < 2:\\n    raise HTTPException(400, detail='Insufficient unique x values for smooth curve')\\nspl = UnivariateSpline(x, y, s=len(x)/2)\\nx_smooth = np.linspace(np.min(x), np.max(x), 200)\\ny_smooth = spl(x_smooth)\\nfig, ax = plt.subplots(figsize=(6, 4))\\nax.scatter(df['signal'], df['score'], color=spec.color if spec.color else 'steelblue', alpha=0.7, label='Data')\\nax.plot(x_smooth, y_smooth, color=spec.color if spec.color else 'crimson', linewidth=2, label='Smooth curve')\\nax.set_title(spec.title if spec.title else 'Smooth Curve: Score vs Signal')\\nax.set_xlabel(spec.x_label if spec.x_label else 'Signal')\\nax.set_ylabel(spec.y_label if spec.y_label else 'Score')\\nax.legend()\\nfig.tight_layout()\\nfig.savefig(buf, format=fmt.value, dpi=300)\\nplt.close(fig)\"}"
+        "- For umap, use umap.UMAP to reduce numeric columns to 2D, create a scatter plot, and color by 'group' if specified. Drop non-numeric columns and handle missing values with dropna(). "
+        "- For roc, use roc_curve and auc from sklearn.metrics, expect 'y' as binary labels and 'x' as predicted probabilities, and plot the ROC curve with AUC in the legend. "
+        "- For pca, use PCA from sklearn.decomposition to reduce numeric columns to 2D, create a scatter plot, and color by 'group' if specified. Drop non-numeric columns and handle missing values with dropna(). "
+        "- Raise HTTPException for errors (e.g., missing columns, invalid data, insufficient unique x values for smooth_curve, or non-binary labels for roc). "
+        "Example output for umap: {\"spec\": {\"chart_type\": \"umap\", \"x\": null, \"y\": null, \"group\": \"category\", \"bins\": null, \"title\": \"UMAP Projection\", \"x_label\": \"UMAP1\", \"y_label\": \"UMAP2\", \"color\": null, \"size\": null, \"fdr_col\": null}, "
+        "\"code\": \"df.columns = [c.strip().lower() for c in df.columns]\\nnum_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]\\nif len(num_cols) < 2:\\n    raise HTTPException(400, detail='Insufficient numeric columns for UMAP')\\ndata = df[num_cols].dropna()\\nif data.empty:\\n    raise HTTPException(400, detail='No valid data after dropping missing values')\\nreducer = umap.UMAP(n_components=2, random_state=42)\\nembedding = reducer.fit_transform(data)\\nfig, ax = plt.subplots(figsize=(6, 4))\\nif spec.group and spec.group in df.columns:\\n    groups = df[spec.group].loc[data.index]\\n    for g in groups.unique():\\n        idx = groups == g\\n        ax.scatter(embedding[idx, 0], embedding[idx, 1], label=g, alpha=0.7)\\n    ax.legend()\\nelse:\\n    ax.scatter(embedding[:, 0], embedding[:, 1], color=spec.color if spec.color else 'steelblue', alpha=0.7)\\nax.set_title(spec.title if spec.title else 'UMAP Projection')\\nax.set_xlabel(spec.x_label if spec.x_label else 'UMAP1')\\nax.set_ylabel(spec.y_label if spec.y_label else 'UMAP2')\\nfig.tight_layout()\\nfig.savefig(buf, format=fmt.value, dpi=300)\\nplt.close(fig)\"}"
     )
     user_prompt = (
         f"Instruction: {instruction}\n"
@@ -181,61 +193,103 @@ def llm_router(instruction: str, df: pd.DataFrame) -> Dict[str, Any]:
 # ---------------------------
 def llm_dataset_qa(question: str, df: pd.DataFrame) -> str:
     question_lower = question.lower().strip()
-    
-    # Handle specific column mean request (e.g., "show mean of age")
-    mean_match = re.match(r"show\s+mean\s+of\s+([a-zA-Z0-9_]+)", question_lower)
-    if mean_match:
-        col = mean_match.group(1)
+
+    # Helper function to format table
+    def format_table(headers: list, rows: list) -> str:
+        table = "| " + " | ".join(headers) + " |\n"
+        table += "| " + " | ".join(["---"] * len(headers)) + " |\n"
+        for row in rows:
+            table += "| " + " | ".join([f"{x:.2f}" if isinstance(x, (int, float)) else str(x) for x in row]) + " |\n"
+        return table
+
+    # Handle specific column statistic requests (e.g., "show mean of age", "show median of age", "show mode of age")
+    stat_match = re.match(r"show\s+(mean|median|mode)\s+of\s+([a-zA-Z0-9_]+)", question_lower)
+    if stat_match:
+        stat_type, col = stat_match.groups()
         normalized_col = normalize_column(col, tuple(df.columns))
         if normalized_col and normalized_col in df.columns:
             if pd.api.types.is_numeric_dtype(df[normalized_col]):
-                mean_value = df[normalized_col].mean()
-                return f"Mean of {normalized_col}: {mean_value:.2f}"
+                if stat_type == "mean":
+                    value = df[normalized_col].mean()
+                elif stat_type == "median":
+                    value = df[normalized_col].median()
+                elif stat_type == "mode":
+                    mode_series = df[normalized_col].mode()
+                    value = mode_series[0] if not mode_series.empty else "No mode"
+                return format_table(
+                    headers=["Column", stat_type.capitalize()],
+                    rows=[[normalized_col, value]]
+                )
             else:
                 return f"Column '{normalized_col}' is not numeric."
         else:
             return f"Column '{col}' not found in dataset."
 
-    # Handle request for means in table format (e.g., "show mean in table")
-    if "show mean in table" in question_lower:
+    # Handle request for statistics in table format (e.g., "show mean in table", "show median in table", "show mode in table")
+    stat_table_match = re.match(r"show\s+(mean|median|mode)\s+in\s+table", question_lower)
+    if stat_table_match:
+        stat_type = stat_table_match.group(1)
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         if not numeric_cols.empty:
-            means = df[numeric_cols].mean()
-            table = "Mean values for numeric columns:\n"
-            table += "| Column | Mean |\n"
-            table += "|--------|------|\n"
-            for col, mean in means.items():
-                table += f"| {col} | {mean:.2f} |\n"
-            return table
+            if stat_type == "mean":
+                values = df[numeric_cols].mean()
+            elif stat_type == "median":
+                values = df[numeric_cols].median()
+            elif stat_type == "mode":
+                values = df[numeric_cols].mode().iloc[0] if not df[numeric_cols].mode().empty else pd.Series(index=numeric_cols)
+            rows = [[col, values.get(col, "No mode" if stat_type == "mode" else np.nan)] for col in numeric_cols]
+            return format_table(
+                headers=["Column", stat_type.capitalize()],
+                rows=rows
+            )
         else:
             return "No numeric columns found in dataset."
 
     # Handle EDA analysis request (e.g., "generate eda analysis of dataset")
     if "generate eda analysis" in question_lower:
         eda = []
-        eda.append(f"Dataset Shape: {df.shape[0]} rows, {df.shape[1]} columns")
-        eda.append("\nColumn Data Types:")
-        for col, dtype in df.dtypes.items():
-            eda.append(f"- {col}: {dtype}")
+
+        # Dataset Shape
+        eda.append("**Dataset Shape**:")
+        rows = [["Rows", df.shape[0]], ["Columns", df.shape[1]]]
+        eda.append(format_table(["Property", "Value"], rows))
         
+        # Column Data Types
+        eda.append("\n**Column Data Types**:")
+        rows = [[col, str(dtype)] for col, dtype in df.dtypes.items()]
+        eda.append(format_table(["Column", "Data Type"], rows))
+        
+        # Summary Statistics for Numeric Columns
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         if not numeric_cols.empty:
-            eda.append("\nSummary Statistics for Numeric Columns:")
+            eda.append("\n**Summary Statistics for Numeric Columns**:")
             stats = df[numeric_cols].describe().T
-            stats_table = "| Column | Count | Mean | Std | Min | 25% | 50% | 75% | Max |\n"
-            stats_table += "|--------|-------|------|-----|-----|-----|-----|-----|-----|\n"
-            for col, row in stats.iterrows():
-                stats_table += f"| {col} | {row['count']:.0f} | {row['mean']:.2f} | {row['std']:.2f} | {row['min']:.2f} | {row['25%']:.2f} | {row['50%']:.2f} | {row['75%']:.2f} | {row['max']:.2f} |\n"
-            eda.append(stats_table)
+            headers = ["Column", "Count", "Mean", "Std", "Min", "25%", "50%", "75%", "Max"]
+            rows = [
+                [col, row['count'], row['mean'], row['std'], row['min'], row['25%'], row['50%'], row['75%'], row['max']]
+                for col, row in stats.iterrows()
+            ]
+            eda.append(format_table(headers, rows))
         
-        eda.append("\nMissing Values:")
+            # Median Values
+            eda.append("\n**Median Values**:")
+            medians = df[numeric_cols].median()
+            rows = [[col, medians[col]] for col in numeric_cols]
+            eda.append(format_table(["Column", "Median"], rows))
+            
+            # Mode Values
+            eda.append("\n**Mode Values**:")
+            modes = df[numeric_cols].mode().iloc[0] if not df[numeric_cols].mode().empty else pd.Series(index=numeric_cols)
+            rows = [[col, modes.get(col, "No mode")] for col in numeric_cols]
+            eda.append(format_table(["Column", "Mode"], rows))
+        
+        # Missing Values
+        eda.append("\n**Missing Values**:")
         missing = df.isnull().sum()
+        rows = [[col, count] for col, count in missing.items()]
         if missing.sum() == 0:
-            eda.append("No missing values.")
-        else:
-            for col, count in missing.items():
-                if count > 0:
-                    eda.append(f"- {col}: {count} missing values")
+            rows = [["All Columns", "No missing values"]]
+        eda.append(format_table(["Column", "Missing Count"], rows))
         
         return "\n".join(eda)
 
@@ -243,18 +297,19 @@ def llm_dataset_qa(question: str, df: pd.DataFrame) -> str:
     system_prompt = (
         "You are an expert assistant that answers questions about a dataset based on its structure and content. "
         "The dataset has columns: " + ", ".join(df.columns.astype(str)) + ". "
-        "Provide a concise, accurate answer to the user's question. For questions requiring computation (e.g., summary statistics, counts, or correlations), perform the analysis using pandas and return the result as a string. "
-        "For questions about column names, data types, or row counts, provide direct answers based on the DataFrame's metadata. "
+        "Provide a concise, accurate answer to the user's question. For questions requiring computation (e.g., summary statistics, counts, or correlations), perform the analysis using pandas and return the result as a markdown table if appropriate, or as a string otherwise. "
+        "For statistical questions (e.g., mean, median, mode, std, min, max), return results in a markdown table with columns [Column, Statistic]. "
+        "For questions about column names, data types, or row counts, provide direct answers as strings. "
         "Do not generate plots or code; return only the answer as a string. "
-        "Example questions and answers: "
+        "Example table for stats: | Column | Statistic |\n|--------|-----------|\n| col1   | 10.5      |\n"
+        "Example non-table answers: "
         "- Q: 'What are the columns?' A: 'Columns: col1, col2, col3' "
         "- Q: 'How many rows?' A: 'Number of rows: 100' "
-        "- Q: 'Show summary statistics' A: 'Summary statistics:\ncol1: mean=10.5, std=2.3, min=5, max=15\ncol2: mean=20.1, std=4.2, min=10, max=30' "
     )
     user_prompt = (
         f"Question: {question}\n"
         f"Dataset info: {df.shape[0]} rows, columns: {', '.join(df.columns.astype(str))} with dtypes: {df.dtypes.to_dict()}\n"
-        "Answer the question concisely as a string, performing any necessary computations on the dataset."
+        "Answer the question concisely as a string, using a markdown table for statistical computations where appropriate."
     )
     content = ""  # Initialize content to avoid UnboundLocalError
     try:
@@ -293,6 +348,10 @@ def render_chart(df: pd.DataFrame, result: Dict[str, Any], fmt: OutputFormat) ->
         'curve_fit': curve_fit,
         'UnivariateSpline': UnivariateSpline,
         'gradient': np.gradient,
+        'umap': umap,
+        'roc_curve': roc_curve,
+        'auc': auc,
+        'PCA': PCA,
         'df': df,
         'spec': spec,
         'buf': buf,

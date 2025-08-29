@@ -14,5 +14,5 @@ export interface DatasetInfo {
 }
 
 export interface QAResponse {
-  answer: string | { columns: string[]; rows: any[][] };
+  answer: string;
 }

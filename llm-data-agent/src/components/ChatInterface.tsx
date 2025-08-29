@@ -11,6 +11,85 @@ interface ChatInterfaceProps {
 const ChatInterface: React.FC<ChatInterfaceProps> = ({ datasetId, addMessage, setError }) => {
   const [input, setInput] = useState('');
 
+  // Parse Markdown table and remove table text from content
+  const parseMarkdownTable = (text: string): { columns: string[], rows: any[][], cleanedContent: string } | null => {
+    const lines = text.split('\n').filter(line => line.trim() !== '');
+    // Check if the response contains a table (starts with "|")
+    const tableStartIndex = lines.findIndex(line => line.startsWith('|'));
+    if (tableStartIndex === -1) return null;
+
+    // Collect table lines
+    let tableLines = [];
+    let tableEndIndex = tableStartIndex;
+    for (let i = tableStartIndex; i < lines.length; i++) {
+      if (lines[i].startsWith('|')) {
+        tableLines.push(lines[i]);
+        tableEndIndex = i;
+      } else {
+        break;
+      }
+    }
+    if (tableLines.length < 3) return null; // Need header, separator, and at least one row
+
+    // Extract headers
+    const headerLine = tableLines[0];
+    const columns = headerLine
+      .split('|')
+      .map(col => col.trim())
+      .filter(col => col !== '');
+
+    // Validate separator line (e.g., "|--------|------|")
+    if (!tableLines[1].match(/^\|[-|:\s]+$/)) return null;
+
+    // Extract rows
+    const rows = tableLines.slice(2).map(line =>
+      line
+        .split('|')
+        .map(cell => cell.trim())
+        .filter(cell => cell !== '')
+    );
+
+    // Ensure rows match column count
+    if (rows.length === 0 || rows.some(row => row.length !== columns.length)) return null;
+
+    // Remove table text and any preceding line (e.g., "Mean values for numeric columns:")
+    const cleanedContent = [
+      ...lines.slice(0, tableStartIndex > 0 ? tableStartIndex - 1 : tableStartIndex),
+      ...lines.slice(tableEndIndex + 1)
+    ].join('\n').trim();
+
+    return { columns, rows, cleanedContent };
+  };
+
+  // Parse summary statistics and remove stats text from content
+  const parseSummaryStats = (text: string): { columns: string[], rows: any[][], cleanedContent: string } | null => {
+    // Look for the summary statistics section
+    const statsMatch = text.match(/Summary statistics: ([^;]+;)+/);
+    if (!statsMatch) return null;
+
+    const statsStr = statsMatch[0].replace('Summary statistics: ', '');
+    const stats = statsStr.split(';').filter(s => s.trim() !== '');
+    if (stats.length === 0) return null;
+
+    // Define columns for summary statistics
+    const columns = ['Column', 'Mean', 'Std', 'Min', 'Max'];
+
+    // Parse each stat into a row
+    const rows = stats.map(stat => {
+      const match = stat.match(/(\w+): mean=([\d.]+), std=([\d.]+), min=([\d.]+), max=([\d.]+)/);
+      if (!match) return null;
+      const [, column, mean, std, min, max] = match;
+      return [column, mean, std, min, max];
+    }).filter(row => row !== null) as any[][];
+
+    if (rows.length === 0) return null;
+
+    // Remove the summary statistics portion from the content
+    const cleanedContent = text.replace(statsMatch[0], '').trim();
+
+    return { columns, rows, cleanedContent };
+  };
+
   const handleSubmit = async () => {
     if (!input.trim()) {
       setError('Please enter a message.');
@@ -62,7 +141,28 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ datasetId, addMessage, se
           dataset_id: datasetId,
           question: input,
         });
-        addMessage({ role: 'assistant', content: response.data.answer });
+        const answer = response.data.answer;
+
+        // Try parsing as a Markdown table
+        let tableData = parseMarkdownTable(answer);
+        let content = tableData ? tableData.cleanedContent : answer;
+
+        // If no Markdown table and the query includes "eda analysis", try parsing summary statistics
+        if (!tableData && input.toLowerCase().includes('eda analysis')) {
+          tableData = parseSummaryStats(answer);
+          content = tableData ? tableData.cleanedContent : answer;
+        }
+
+        // Add message with table or content
+        if (tableData) {
+          addMessage({ 
+            role: 'assistant', 
+            content: content.trim() !== '' ? content : undefined, 
+            table: { columns: tableData.columns, rows: tableData.rows }
+          });
+        } else {
+          addMessage({ role: 'assistant', content: answer });
+        }
       }
       setError(null);
       setInput('');
