@@ -10,84 +10,97 @@ interface ChatInterfaceProps {
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({ datasetId, addMessage, setError }) => {
   const [input, setInput] = useState('');
+  const [customerName, setCustomerName] = useState('');
+  const [reportFormat, setReportFormat] = useState<'pdf' | 'docx'>('pdf');
+  const [filename, setFilename] = useState('');
 
   // Parse Markdown table and remove table text from content
   const parseMarkdownTable = (text: string): { columns: string[], rows: any[][], cleanedContent: string } | null => {
     const lines = text.split('\n').filter(line => line.trim() !== '');
-    // Check if the response contains a table (starts with "|")
-    const tableStartIndex = lines.findIndex(line => line.startsWith('|'));
-    if (tableStartIndex === -1) return null;
+    const tableSections: { columns: string[], rows: any[][], startIndex: number, endIndex: number }[] = [];
 
-    // Collect table lines
-    let tableLines = [];
-    let tableEndIndex = tableStartIndex;
-    for (let i = tableStartIndex; i < lines.length; i++) {
+    // Find all table sections
+    let i = 0;
+    while (i < lines.length) {
       if (lines[i].startsWith('|')) {
-        tableLines.push(lines[i]);
-        tableEndIndex = i;
+        let tableLines = [];
+        let tableStartIndex = i;
+        let tableEndIndex = i;
+        // Collect table lines
+        while (i < lines.length && lines[i].startsWith('|')) {
+          tableLines.push(lines[i]);
+          tableEndIndex = i;
+          i++;
+        }
+        if (tableLines.length >= 3) { // Need header, separator, and at least one row
+          // Extract headers
+          const headerLine = tableLines[0];
+          const columns = headerLine
+            .split('|')
+            .map(col => col.trim())
+            .filter(col => col !== '');
+          
+          // Validate separator line
+          if (tableLines[1].match(/^\|[-|:\s]+$/)) {
+            // Extract rows
+            const rows = tableLines.slice(2).map(line =>
+              line
+                .split('|')
+                .map(cell => cell.trim())
+                .filter(cell => cell !== '')
+            );
+            // Ensure rows match column count
+            if (rows.every(row => row.length === columns.length)) {
+              tableSections.push({ columns, rows, startIndex: tableStartIndex, endIndex: tableEndIndex });
+            }
+          }
+        }
       } else {
-        break;
+        i++;
       }
     }
-    if (tableLines.length < 3) return null; // Need header, separator, and at least one row
 
-    // Extract headers
-    const headerLine = tableLines[0];
-    const columns = headerLine
-      .split('|')
-      .map(col => col.trim())
-      .filter(col => col !== '');
+    if (tableSections.length === 0) return null;
 
-    // Validate separator line (e.g., "|--------|------|")
-    if (!tableLines[1].match(/^\|[-|:\s]+$/)) return null;
+    // Combine all tables into one for display (or pick the most relevant one)
+    const combinedColumns = tableSections[0].columns; // Use first table's columns for simplicity
+    const combinedRows = tableSections.flatMap(section => section.rows);
 
-    // Extract rows
-    const rows = tableLines.slice(2).map(line =>
-      line
-        .split('|')
-        .map(cell => cell.trim())
-        .filter(cell => cell !== '')
-    );
+    // Remove all table sections from content
+    let cleanedLines = [...lines];
+    // Sort sections by startIndex in descending order to avoid index shifting when removing
+    const sortedSections = tableSections.sort((a, b) => b.startIndex - a.startIndex);
+    for (const section of sortedSections) {
+      // Remove the table lines and the line before it (e.g., section header like "**Dataset Shape**:")
+      const start = section.startIndex > 0 ? section.startIndex - 1 : section.startIndex;
+      cleanedLines = [
+        ...cleanedLines.slice(0, start),
+        ...cleanedLines.slice(section.endIndex + 1)
+      ];
+    }
+    const cleanedContent = cleanedLines.join('\n').trim();
 
-    // Ensure rows match column count
-    if (rows.length === 0 || rows.some(row => row.length !== columns.length)) return null;
-
-    // Remove table text and any preceding line (e.g., "Mean values for numeric columns:")
-    const cleanedContent = [
-      ...lines.slice(0, tableStartIndex > 0 ? tableStartIndex - 1 : tableStartIndex),
-      ...lines.slice(tableEndIndex + 1)
-    ].join('\n').trim();
-
-    return { columns, rows, cleanedContent };
+    return { columns: combinedColumns, rows: combinedRows, cleanedContent };
   };
 
   // Parse summary statistics and remove stats text from content
   const parseSummaryStats = (text: string): { columns: string[], rows: any[][], cleanedContent: string } | null => {
     // Look for the summary statistics section
-    const statsMatch = text.match(/Summary statistics: ([^;]+;)+/);
+    const statsMatch = text.match(/Summary Statistics for Numeric Columns:([\s\S]*?)(\n\n|$)/);
     if (!statsMatch) return null;
 
-    const statsStr = statsMatch[0].replace('Summary statistics: ', '');
-    const stats = statsStr.split(';').filter(s => s.trim() !== '');
-    if (stats.length === 0) return null;
+    const statsText = statsMatch[1].trim();
+    const tableData = parseMarkdownTable(statsText);
+    if (!tableData) return null;
 
-    // Define columns for summary statistics
-    const columns = ['Column', 'Mean', 'Std', 'Min', 'Max'];
-
-    // Parse each stat into a row
-    const rows = stats.map(stat => {
-      const match = stat.match(/(\w+): mean=([\d.]+), std=([\d.]+), min=([\d.]+), max=([\d.]+)/);
-      if (!match) return null;
-      const [, column, mean, std, min, max] = match;
-      return [column, mean, std, min, max];
-    }).filter(row => row !== null) as any[][];
-
-    if (rows.length === 0) return null;
-
-    // Remove the summary statistics portion from the content
+    // Remove the summary statistics section from the content
     const cleanedContent = text.replace(statsMatch[0], '').trim();
 
-    return { columns, rows, cleanedContent };
+    return {
+      columns: tableData.columns,
+      rows: tableData.rows,
+      cleanedContent
+    };
   };
 
   const handleSubmit = async () => {
@@ -143,13 +156,23 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ datasetId, addMessage, se
         });
         const answer = response.data.answer;
 
-        // Try parsing as a Markdown table
-        let tableData = parseMarkdownTable(answer);
-        let content = tableData ? tableData.cleanedContent : answer;
+        // For EDA analysis or summary statistics, force table parsing
+        let tableData = null;
+        let content = answer;
 
-        // If no Markdown table and the query includes "eda analysis", try parsing summary statistics
-        if (!tableData && input.toLowerCase().includes('eda analysis')) {
-          tableData = parseSummaryStats(answer);
+        if (input.toLowerCase().includes('eda analysis') || input.toLowerCase().includes('summary statistics')) {
+          // Try parsing as a multi-section Markdown table
+          tableData = parseMarkdownTable(answer);
+          content = tableData ? tableData.cleanedContent : answer;
+
+          // If no table found for EDA/summary stats, try parsing specifically for summary statistics
+          if (!tableData && input.toLowerCase().includes('summary statistics')) {
+            tableData = parseSummaryStats(answer);
+            content = tableData ? tableData.cleanedContent : answer;
+          }
+        } else {
+          // Try parsing as a Markdown table for other responses
+          tableData = parseMarkdownTable(answer);
           content = tableData ? tableData.cleanedContent : answer;
         }
 
@@ -174,6 +197,49 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ datasetId, addMessage, se
     }
   };
 
+  const handleGenerateReport = async () => {
+    if (!datasetId) {
+      setError('Please upload a dataset first.');
+      return;
+    }
+    if (!customerName.trim()) {
+      setError('Please enter a customer name.');
+      return;
+    }
+    if (!filename.trim()) {
+      setError('Please enter a report filename.');
+      return;
+    }
+
+    try {
+      const response = await axios.post(
+        'http://127.0.0.1:8000/generate_report',
+        { dataset_id: datasetId, customer_name: customerName, filename, format: reportFormat },
+        { responseType: 'blob' }
+      );
+
+      const sanitizedFilename = filename.replace(/[^a-zA-Z0-9-_]/g, '_');
+      const outputFilename = `${sanitizedFilename}.${reportFormat}`;
+
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', outputFilename);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+
+      addMessage({ role: 'assistant', content: `Generated ${reportFormat.toUpperCase()} report: ${filename}` });
+      setError(null);
+    } catch (err) {
+      const error = err as AxiosError<{ detail?: string }>;
+      const errorMessage = error.response?.data?.detail || error.message || 'Unknown error';
+      addMessage({ role: 'assistant', content: `Error generating report: ${errorMessage}` });
+      setError(`Report generation failed: ${errorMessage}`);
+    }
+  };
+
   return (
     <div className="chat-container">
       <h2>Chat with the Data Agent</h2>
@@ -187,6 +253,31 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ datasetId, addMessage, se
           onKeyPress={(e) => e.key === 'Enter' && handleSubmit()}
         />
         <button onClick={handleSubmit}>Send</button>
+      </div>
+      <div className="report-container">
+        <h3>Generate Report</h3>
+        <input
+          type="text"
+          value={customerName}
+          onChange={(e) => setCustomerName(e.target.value)}
+          placeholder="Enter customer name"
+        />
+        <input
+          type="text"
+          value={filename}
+          onChange={(e) => setFilename(e.target.value)}
+          placeholder="Enter report filename"
+        />
+        <select
+          value={reportFormat}
+          onChange={(e) => setReportFormat(e.target.value as 'pdf' | 'docx')}
+        >
+          <option value="pdf">PDF</option>
+          <option value="docx">Word (DOCX)</option>
+        </select>
+        <button onClick={handleGenerateReport} disabled={!customerName || !filename || !datasetId}>
+          Submit
+        </button>
       </div>
     </div>
   );
