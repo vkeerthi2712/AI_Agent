@@ -6,9 +6,9 @@ Backend is a FastAPI server that generates audit-ready reports (Word/PDF) using 
 
 1.File Upload & Query Input
 
-Users upload .csv or .xlsx files.
+- Users upload .csv or .xlsx files.
 
-Users provide a query, e.g., "Generate a sales report summarizing key insights".
+- Users provide a query, e.g., "Generate a sales report summarizing key insights".
 
 2.Gemini AI Integration
 
