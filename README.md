@@ -96,8 +96,12 @@ Commands:
 
 1.Run the backend file first 
 
-``` bash python -m uvicorn Report_agent:app --reload ```
+``` bash
+python -m uvicorn Report_agent:app --reload
+```
 
 2.Run the frontend file in another terminal 
 
-``` bash python -m streamlit run streamlit_app.py ```
+``` bash 
+python -m streamlit run streamlit_app.py
+```
