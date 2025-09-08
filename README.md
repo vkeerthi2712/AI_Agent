@@ -12,7 +12,7 @@ Backend is a FastAPI server that generates audit-ready reports (Word/PDF) using 
 
 2.Gemini AI Integration
 
--The get_gemini_text function sends prompts to Gemini API (Google’s LLM) to generate:
+- The get_gemini_text function sends prompts to Gemini API (Google’s LLM) to generate:
 
  - Executive Summary
 
@@ -60,7 +60,7 @@ Backend is a FastAPI server that generates audit-ready reports (Word/PDF) using 
 
  - Gemini API issues
 
-## Frontend Code (Streamlit)
+## Frontend Code (streamlit_app.py)
 
 Frontend is a Streamlit app for easy user interaction.
 
@@ -91,3 +91,10 @@ Frontend is a Streamlit app for easy user interaction.
  - Word → application/vnd.openxmlformats-officedocument.wordprocessingml.document
 
  - PDF → application/pdf
+
+Commands:
+1.Run the backend file first 
+` python -m uvicorn Report_agent:app --reload
+
+2.Run the frontend file in another terminal 
+` python -m streamlit run streamlit_app.py  
