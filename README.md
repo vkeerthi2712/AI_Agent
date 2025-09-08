@@ -93,8 +93,11 @@ Frontend is a Streamlit app for easy user interaction.
  - PDF → application/pdf
 
 Commands:
+
 1.Run the backend file first 
-` python -m uvicorn Report_agent:app --reload
+
+` python -m uvicorn Report_agent:app --reload `
 
 2.Run the frontend file in another terminal 
-` python -m streamlit run streamlit_app.py  
+
+` python -m streamlit run streamlit_app.py `
